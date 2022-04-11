@@ -608,7 +608,7 @@ class CausalForestDML(_BaseDML):
 
     def tune(self, Y, T, *, X=None, W=None,
              sample_weight=None, groups=None,
-             params='auto'):
+             params='auto', **nuisance_fit_kargs):
         """
         Tunes the major hyperparameters of the final stage causal forest based on out-of-sample R-score
         performance. It trains small forests of size 100 trees on a grid of parameters and tests the
@@ -682,7 +682,7 @@ class CausalForestDML(_BaseDML):
                          discrete_treatment=est.discrete_treatment, categories=est.categories,
                          cv=est.cv, mc_iters=est.mc_iters, mc_agg=est.mc_agg,
                          random_state=est.random_state)
-        scorer.fit(yval, Tval, X=Xval, W=Wval, sample_weight=sample_weight_val, groups=groups_val)
+        scorer.fit(yval, Tval, X=Xval, W=Wval, sample_weight=sample_weight_val, groups=groups_val, **nuisance_fit_kargs)
 
         names = params.keys()
         scores = []
@@ -691,7 +691,7 @@ class CausalForestDML(_BaseDML):
                 setattr(est, key, value)
             if it == 0:
                 est.fit(ytrain, Ttrain, X=Xtrain, W=Wtrain, sample_weight=sample_weight_train,
-                        groups=groups_train, cache_values=True)
+                        groups=groups_train, cache_values=True, **nuisance_fit_kargs)
             else:
                 est.refit_final()
             scores.append((scorer.score(est), tuple(zip(names, values))))
@@ -705,7 +705,7 @@ class CausalForestDML(_BaseDML):
 
     # override only so that we can update the docstring to indicate support for `blb`
     def fit(self, Y, T, *, X=None, W=None, sample_weight=None, groups=None,
-            cache_values=False, inference='auto'):
+            cache_values=False, inference='auto', **nuisance_fit_kargs):
         """
         Estimate the counterfactual model from data, i.e. estimates functions τ(·,·,·), ∂τ(·,·).
 
@@ -741,7 +741,8 @@ class CausalForestDML(_BaseDML):
         return super().fit(Y, T, X=X, W=W,
                            sample_weight=sample_weight, groups=groups,
                            cache_values=cache_values,
-                           inference=inference)
+                           inference=inference,
+                           **nuisance_fit_kargs)
 
     def refit_final(self, *, inference='auto'):
         return super().refit_final(inference=inference)

@@ -114,7 +114,7 @@ class RScorer:
         self.mc_iters = mc_iters
         self.mc_agg = mc_agg
 
-    def fit(self, y, T, X=None, W=None, sample_weight=None, groups=None):
+    def fit(self, y, T, X=None, W=None, sample_weight=None, groups=None, **nuisance_fit_kargs):
         """
 
         Parameters
@@ -150,7 +150,7 @@ class RScorer:
                                     mc_iters=self.mc_iters,
                                     mc_agg=self.mc_agg)
         self.lineardml_.fit(y, T, X=None, W=np.hstack([v for v in [X, W] if v is not None]),
-                            sample_weight=sample_weight, groups=groups, cache_values=True)
+                            sample_weight=sample_weight, groups=groups, cache_values=True, **nuisance_fit_kargs)
         self.base_score_ = self.lineardml_.score_
         self.dx_ = X.shape[1]
         return self

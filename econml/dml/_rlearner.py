@@ -46,10 +46,12 @@ class _ModelNuisance:
         self._model_y = model_y
         self._model_t = model_t
 
-    def fit(self, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None):
+    def fit(self, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None, **nuisance_fit_kargs):
         assert Z is None, "Cannot accept instrument!"
-        self._model_t.fit(X, W, T, **filter_none_kwargs(sample_weight=sample_weight, groups=groups))
-        self._model_y.fit(X, W, Y, **filter_none_kwargs(sample_weight=sample_weight, groups=groups))
+        self._model_t.fit(X, W, T, **filter_none_kwargs(sample_weight=sample_weight, groups=groups),
+                          **nuisance_fit_kargs.get('nuisance_T', {}))
+        self._model_y.fit(X, W, Y, **filter_none_kwargs(sample_weight=sample_weight, groups=groups),
+                          **nuisance_fit_kargs.get('nuisance_Y', {}))
         return self
 
     def score(self, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None):
@@ -327,7 +329,7 @@ class _RLearner(_OrthoLearner):
         return _ModelFinal(self._gen_rlearner_model_final())
 
     def fit(self, Y, T, *, X=None, W=None, sample_weight=None, freq_weight=None, sample_var=None, groups=None,
-            cache_values=False, inference=None):
+            cache_values=False, inference=None, **nuisance_fit_kargs):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -368,7 +370,8 @@ class _RLearner(_OrthoLearner):
         return super().fit(Y, T, X=X, W=W,
                            sample_weight=sample_weight, freq_weight=freq_weight, sample_var=sample_var, groups=groups,
                            cache_values=cache_values,
-                           inference=inference)
+                           inference=inference,
+                           **nuisance_fit_kargs)
 
     def score(self, Y, T, X=None, W=None, sample_weight=None):
         """

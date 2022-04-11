@@ -47,7 +47,7 @@ from .utilities import (_deprecate_positional, check_input_arrays,
                         inverse_onehot, ndim, reshape, shape, transpose)
 
 
-def _crossfit(model, folds, *args, **kwargs):
+def _crossfit(model, folds, nuisance_fit_kargs={}, *args, **kwargs):
     """
     General crossfit based calculation of nuisance parameters.
 
@@ -135,7 +135,7 @@ def _crossfit(model, folds, *args, **kwargs):
 
     if folds is None:  # skip crossfitting
         model_list.append(clone(model, safe=False))
-        model_list[0].fit(*args, **kwargs)
+        model_list[0].fit(*args, **kwargs, **nuisance_fit_kargs)
         nuisances = model_list[0].predict(*args, **kwargs)
         scores = model_list[0].score(*args, **kwargs) if calculate_scores else None
 
@@ -165,7 +165,7 @@ def _crossfit(model, folds, *args, **kwargs):
         kwargs_train = {key: var[train_idxs] for key, var in kwargs.items()}
         kwargs_test = {key: var[test_idxs] for key, var in kwargs.items()}
 
-        model_list[idx].fit(*args_train, **kwargs_train)
+        model_list[idx].fit(*args_train, **kwargs_train, **nuisance_fit_kargs)
 
         nuisance_temp = model_list[idx].predict(*args_test, **kwargs_test)
 
@@ -545,7 +545,7 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
 
     @BaseCateEstimator._wrap_fit
     def fit(self, Y, T, *, X=None, W=None, Z=None, sample_weight=None, freq_weight=None, sample_var=None, groups=None,
-            cache_values=False, inference=None, only_final=False, check_input=True):
+            cache_values=False, inference=None, only_final=False, check_input=True, **nuisance_fit_kargs):
         """
         Estimate the counterfactual model from data, i.e. estimates function :math:`\\theta(\\cdot)`.
 
@@ -634,7 +634,8 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
             self._models_nuisance = []
             for idx in range(self.mc_iters or 1):
                 nuisances, fitted_models, new_inds, scores = self._fit_nuisances(
-                    Y, T, X, W, Z, sample_weight=sample_weight_nuisances, groups=groups)
+                    Y, T, X, W, Z, sample_weight=sample_weight_nuisances, groups=groups,
+                    **nuisance_fit_kargs)
                 all_nuisances.append(nuisances)
                 self._models_nuisance.append(fitted_models)
                 if scores is None:
@@ -725,7 +726,7 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
                           cache_values=True, inference=inference, only_final=True, check_input=False)
         return self
 
-    def _fit_nuisances(self, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None):
+    def _fit_nuisances(self, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None, **nuisance_fit_kargs):
 
         # use a binary array to get stratified split in case of discrete treatment
         stratify = self.discrete_treatment or self.discrete_instrument
@@ -764,6 +765,7 @@ class _OrthoLearner(TreatmentExpansionMixin, LinearCateEstimator):
                 folds = splitter.split(to_split, strata)
 
         nuisances, fitted_models, fitted_inds, scores = _crossfit(self._ortho_learner_model_nuisance, folds,
+                                                                  nuisance_fit_kargs,
                                                                   Y, T, X=X, W=W, Z=Z,
                                                                   sample_weight=sample_weight, groups=groups)
         return nuisances, fitted_models, fitted_inds, scores

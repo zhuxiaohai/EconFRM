@@ -58,7 +58,7 @@ class _FirstStageWrapper:
         else:
             return XW
 
-    def fit(self, X, W, Target, sample_weight=None, groups=None):
+    def fit(self, X, W, Target, sample_weight=None, groups=None, **fit_args):
         if (not self._is_Y) and self._discrete_treatment:
             # In this case, the Target is the one-hot-encoding of the treatment variable
             # We need to go back to the label representation of the one-hot so as to call
@@ -70,9 +70,9 @@ class _FirstStageWrapper:
 
         if sample_weight is not None:
             fit_with_groups(self._model, self._combine(X, W, Target.shape[0]), Target, groups=groups,
-                            sample_weight=sample_weight)
+                            sample_weight=sample_weight, **fit_args)
         else:
-            fit_with_groups(self._model, self._combine(X, W, Target.shape[0]), Target, groups=groups)
+            fit_with_groups(self._model, self._combine(X, W, Target.shape[0]), Target, groups=groups, **fit_args)
         return self
 
     def predict(self, X, W):
@@ -462,7 +462,7 @@ class DML(LinearModelFinalCateEstimatorMixin, _BaseDML):
 
     # override only so that we can update the docstring to indicate support for `LinearModelFinalInference`
     def fit(self, Y, T, *, X=None, W=None, sample_weight=None, freq_weight=None, sample_var=None, groups=None,
-            cache_values=False, inference='auto'):
+            cache_values=False, inference='auto', **nuisance_fit_kargs):
         """
         Estimate the counterfactual model from data, i.e. estimates functions τ(·,·,·), ∂τ(·,·).
 
@@ -503,7 +503,8 @@ class DML(LinearModelFinalCateEstimatorMixin, _BaseDML):
         return super().fit(Y, T, X=X, W=W, sample_weight=sample_weight, freq_weight=freq_weight,
                            sample_var=sample_var, groups=groups,
                            cache_values=cache_values,
-                           inference=inference)
+                           inference=inference,
+                           **nuisance_fit_kargs)
 
     def refit_final(self, *, inference='auto'):
         return super().refit_final(inference=inference)
@@ -614,7 +615,7 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
 
     # override only so that we can update the docstring to indicate support for `StatsModelsInference`
     def fit(self, Y, T, *, X=None, W=None, sample_weight=None, freq_weight=None, sample_var=None, groups=None,
-            cache_values=False, inference='auto'):
+            cache_values=False, inference='auto', **nuisance_fit_kargs):
         """
         Estimate the counterfactual model from data, i.e. estimates functions τ(·,·,·), ∂τ(·,·).
 
@@ -655,7 +656,8 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
         return super().fit(Y, T, X=X, W=W,
                            sample_weight=sample_weight, freq_weight=freq_weight, sample_var=sample_var, groups=groups,
                            cache_values=cache_values,
-                           inference=inference)
+                           inference=inference,
+                           **nuisance_fit_kargs)
 
     @property
     def model_final(self):

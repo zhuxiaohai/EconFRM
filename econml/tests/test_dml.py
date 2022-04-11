@@ -3,26 +3,45 @@
 
 import unittest
 import pytest
+
 import pickle
+from contextlib import ExitStack
+import itertools
+from itertools import product
+
+import scipy
+import numpy as np
+import pandas as pd
+
 from sklearn.linear_model import LinearRegression, Lasso, LassoCV, LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, FunctionTransformer, PolynomialFeatures
-from sklearn.model_selection import KFold, GroupKFold
-from econml.dml import DML, LinearDML, SparseLinearDML, KernelDML, CausalForestDML
-from econml.dml import NonParamDML
-import numpy as np
-import pandas as pd
-from econml.utilities import shape, hstack, vstack, reshape, cross_product
-from econml.inference import BootstrapInference, EmpiricalInferenceResults, NormalInferenceResults
-from contextlib import ExitStack
+from sklearn.model_selection import KFold, GroupKFold, train_test_split
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
-import itertools
-from econml.sklearn_extensions.linear_model import WeightedLasso, StatsModelsRLM, StatsModelsLinearRegression
-from econml.tests.test_statsmodels import _summarize
-import econml.tests.utilities  # bugfix for assertWarns
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.multioutput import MultiOutputRegressor
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import roc_auc_score
+
+import matplotlib.pyplot as plt
+
+from xgboost import XGBClassifier
+
+from econml.dml import DML, LinearDML, SparseLinearDML, KernelDML, CausalForestDML
+from econml.dml import NonParamDML
+from econml.dml.utils import get_pred_y, get_pred_t, get_nuisances
+
+from econml.utilities import shape, hstack, vstack, reshape, cross_product
+from econml.inference import BootstrapInference, EmpiricalInferenceResults, NormalInferenceResults
 from econml.grf import MultiOutputGRF
+from econml.tuner.tuner_base import OptunaSearch
+
+from econml.sklearn_extensions.linear_model import WeightedLasso, StatsModelsRLM, StatsModelsLinearRegression
+from econml.sklearn_extensions.calibration import CalibratedClassifierCV
+
+from econml.tests.test_statsmodels import _summarize
+import econml.tests.utilities  # bugfix for assertWarns
+
 
 # all solutions to underdetermined (or exactly determined) Ax=b are given by A⁺b+(I-A⁺A)w for some arbitrary w
 # note that if Ax=b is overdetermined, this will raise an assertion error
@@ -34,6 +53,39 @@ def rand_sol(A, b):
     A_plus = np.linalg.pinv(A)
     x = A_plus @ b
     return x + (np.eye(x.shape[0]) - A_plus @ A) @ np.random.normal(size=x.shape)
+
+
+def te_func(x, n_treatments=3):
+    return [np.exp(2 * x[0]), 3 * scipy.special.expit(100 * (x[0] - .5)) - 1,
+            -2 * scipy.special.expit(100 * (x[0] - .25))]
+
+
+def get_test_train_data(n, n_w, support_size, n_x, te_func, n_treatments, classification=True):
+    # Outcome support
+    support_Y = np.random.choice(range(n_w), size=support_size, replace=False)
+    coefs_Y = np.random.uniform(0, 1, size=support_size)
+    epsilon_sample = lambda n: np.random.uniform(-1, 1, size=n)
+    # Treatment support
+    support_T = support_Y
+    coefs_T = np.random.uniform(0, 1, size=(support_size, n_treatments))
+    eta_sample = lambda n: np.random.uniform(-1, 1, size=n)
+    # Generate controls, covariates, treatments and outcomes
+    W = np.random.normal(0, 1, size=(n, n_w))
+    X = np.random.uniform(0, 1, size=(n, n_x))
+    # Heterogeneous treatment effects
+    TE = np.array([te_func(x_i, n_treatments) for x_i in X])
+    log_odds = np.dot(W[:, support_T], coefs_T)
+    T_sigmoid = np.exp(log_odds)
+    T_sigmoid = T_sigmoid / np.sum(T_sigmoid, axis=1, keepdims=True)
+    T = np.array([np.random.choice(n_treatments, p=p) for p in T_sigmoid])
+    TE = np.concatenate((np.zeros((n, 1)), TE), axis=1)
+    Y = TE[np.arange(n), T] + np.dot(W[:, support_Y], coefs_Y) + epsilon_sample(n)
+    if classification:
+        Y = 1 / (1 + np.exp(-Y))
+        Y = np.array([np.random.binomial(1, p) for p in Y])
+    X_test = np.array(list(product(np.arange(0, 1, 0.01), repeat=n_x)))
+
+    return (Y, T, X, W), (X_test, np.array([te_func(x, n_treatments) for x in X_test]))
 
 
 @pytest.mark.dml
@@ -1173,3 +1225,211 @@ class TestDML(unittest.TestCase):
         est = LinearDML(cv=GroupKFold(2))
         with pytest.raises(Exception):
             est.fit(y, t, groups=groups)
+
+    def test_nuisance_fit_kargs(self):
+        np.random.seed(123)
+        (Y, T, X, W), (X_test, te_test) = get_test_train_data(2000, 3, 3, 1, te_func, 4)
+        x_names = ['X_{}'.format(i) for i in range(X.shape[1])]
+        w_names = ['W_{}'.format(i) for i in range(W.shape[1])]
+        df = pd.DataFrame(X, columns=x_names)
+        df[w_names] = W
+        df['T'] = T
+        df['Y'] = Y
+        train_data, val_data = train_test_split(df, test_size=0.2, random_state=2)
+
+        xgb_param = {'max_depth': 4, 'reg_lambda': 1, 'reg_alpha': 14, 'gamma': 1, 'min_child_weight': 15,
+                     'colsample_bytree': 0.7999999999999999, 'colsample_bylevel': 0.7999999999999999,
+                     'use_label_encoder': False,
+                     'colsample_bynode': 0.85, 'subsample': 1.0, 'learning_rate': 0.19, 'verbosity': 0, 'seed': 2}
+        est2 = CausalForestDML(model_t='auto',
+                               model_y=CalibratedClassifierCV(XGBClassifier(**xgb_param), cv=2),
+                               n_estimators=100, min_samples_leaf=5,
+                               max_depth=50,
+                               discrete_treatment=True,
+                               cv=1,
+                               verbose=0, random_state=123, )
+        est2.fit(train_data['Y'].values,
+                 train_data['T'].values,
+                 X=train_data[x_names].values,
+                 W=train_data[w_names].values,
+                 cache_values=True,
+                 **{'nuisance_Y': {'verbose': True,
+                                   'eval_metric': 'auc',
+                                   'early_stopping_rounds': 5,
+                                   'eval_set': [(val_data[x_names + w_names].values, val_data['Y'].values)]}}
+                 )
+
+        # %%
+        T = est2.transformer.transform(reshape(val_data['T'].values, (-1, 1)))
+        T_res = est2.models_nuisance_[0][0].predict(
+            val_data['Y'].values, T,
+            val_data[x_names].values, val_data[w_names].values)[1]
+        T_res_cal = T - est2.models_t[0][0].predict_proba(
+            val_data[x_names + w_names].values)[:, 1:]
+        np.testing.assert_array_equal(T_res, T_res_cal)
+
+        # %%
+        T = est2.transformer.transform(reshape(val_data['T'].values, (-1, 1)))
+        T_res = get_nuisances(est2, val_data['Y'].values, val_data['T'].values,
+                              val_data[x_names].values, val_data[w_names].values)[1]
+        T_res_cal = T - get_pred_t(est2, val_data[x_names].values, val_data[w_names].values)[0]
+        np.testing.assert_array_equal(T_res, T_res_cal)
+
+        # %%
+        T = est2.transformer.transform(reshape(val_data['T'].values, (-1, 1)))
+        y_res = est2.models_nuisance_[0][0].predict(
+            val_data['Y'].values, T,
+            val_data[x_names].values, val_data[w_names].values)[0]
+        y_res_cal = val_data['Y'].values - est2.models_y[0][0].predict(
+            val_data[x_names + w_names].values)
+        np.testing.assert_array_equal(y_res, y_res_cal)
+
+        # %%
+        y_res = get_nuisances(est2, val_data['Y'].values, val_data['T'].values,
+                              val_data[x_names].values, val_data[w_names].values)[0]
+        y_res_cal = val_data['Y'].values - get_pred_y(est2, val_data[x_names].values, val_data[w_names].values)[0]
+        np.testing.assert_array_equal(y_res, y_res_cal)
+
+        # %%
+        T = est2.transformer.transform(reshape(train_data['T'].values, (-1, 1)))
+        y_res = est2.models_nuisance_[0][0].predict(
+            train_data['Y'].values, T,
+            train_data[x_names].values, train_data[w_names].values)[0]
+        np.testing.assert_array_equal(y_res, est2._cached_values.nuisances[0])
+
+        # %%
+        T = est2.transformer.transform(reshape(train_data['T'].values, (-1, 1)))
+        T_res = est2.models_nuisance_[0][0].predict(
+            train_data['Y'].values, T,
+            train_data[x_names].values, train_data[w_names].values)[1]
+        np.testing.assert_array_equal(T_res, est2._cached_values.nuisances[1])
+
+        # %%
+        prob_true, prob_pred = calibration_curve(val_data['Y'].values,
+                                                 est2.models_y[0][0].predict(
+                                                     val_data[x_names + w_names].values))
+        fig, ax = plt.subplots()
+        ax.plot(prob_true, prob_pred)
+        ax.scatter(np.arange(0, 1.1, 0.1), np.arange(0, 1.1, 0.1))
+        plt.show()
+
+    def test_optuna_XGB(self):
+        class WrapperXgbClassifier(XGBClassifier):
+            def score(self, X, y, **kargs):
+                return roc_auc_score(y, self.predict_proba(X)[:, 1])
+        np.random.seed(123)
+        (Y, T, X, W), (X_test, te_test) = get_test_train_data(2000, 3, 3, 1, te_func, 4)
+        x_names = ['X_{}'.format(i) for i in range(X.shape[1])]
+        w_names = ['W_{}'.format(i) for i in range(W.shape[1])]
+        df = pd.DataFrame(X, columns=x_names)
+        df[w_names] = W
+        df['T'] = T
+        df['Y'] = Y
+        train_data, val_data = train_test_split(df, test_size=0.2, random_state=2)
+
+        op = OptunaSearch(n_startup_trials=5, n_warmup_steps=5,
+                          n_trials=20, optuna_njobs=1,
+                          coef_train_val_disparity=0.2)
+        tuning_param_dict = {'use_label_encoder': False,
+                             'verbosity': 0,
+                             'random_state': 2,
+                             'max_depth': ('int', {'low': 2, 'high': 6}),
+                             'reg_lambda': ('int', {'low': 1, 'high': 20}),
+                             'reg_alpha': ('int', {'low': 1, 'high': 20}),
+                             'gamma': ('int', {'low': 0, 'high': 3}),
+                             'min_child_weight': ('int', {'low': 1, 'high': 30}),
+                             'colsample_bytree': ('discrete_uniform', {'low': 0.7, 'high': 1, 'q': 0.05}),
+                             'colsample_bylevel': ('discrete_uniform', {'low': 0.7, 'high': 1, 'q': 0.05}),
+                             'colsample_bynode': ('discrete_uniform', {'low': 0.7, 'high': 1, 'q': 0.05}),
+                             'subsample': ('discrete_uniform', {'low': 0.7, 'high': 1, 'q': 0.05}),
+                             'learning_rate': ('discrete_uniform', {'low': 0.07, 'high': 1.2, 'q': 0.01})}
+        train_params = {'X': train_data[x_names + w_names],
+                        'y': train_data['Y'],
+                        'eval_set': [(val_data[x_names + w_names], val_data['Y'])],
+                        'eval_metric': 'auc',
+                        'early_stopping_rounds': 5,
+                        'verbose': True}
+        val_params = {'X': val_data[x_names + w_names], 'y': val_data['Y']}
+        estimator = WrapperXgbClassifier()
+        op.search(estimator, tuning_param_dict, train_params, val_params)
+
+        opt_param = op.get_params()
+        print('optimal params: ', opt_param)
+        a = WrapperXgbClassifier(**opt_param[0])
+        a.fit(**train_params)
+        assert a.score(**val_params) == float(opt_param[-1]['val_score'])
+        assert a.score(**train_params) == float(opt_param[-1]['train_score'])
+        assert a.score(**val_params) == roc_auc_score(val_data['Y'], a.predict_proba(val_data[x_names + w_names])[:, 1])
+
+    def test_optuna_dml_final_stage(self):
+        np.random.seed(123)
+        (Y, T, X, W), (X_test, te_test) = get_test_train_data(2000, 3, 3, 1, te_func, 4)
+        x_names = ['X_{}'.format(i) for i in range(X.shape[1])]
+        w_names = ['W_{}'.format(i) for i in range(W.shape[1])]
+        df = pd.DataFrame(X, columns=x_names)
+        df[w_names] = W
+        df['T'] = T
+        df['Y'] = Y
+        train_data, val_data = train_test_split(df, test_size=0.2, random_state=2)
+
+        xgb_param = {'max_depth': 4, 'reg_lambda': 1, 'reg_alpha': 14, 'gamma': 1, 'min_child_weight': 15,
+                     'colsample_bytree': 0.7999999999999999, 'colsample_bylevel': 0.7999999999999999,
+                     'use_label_encoder': False,
+                     'colsample_bynode': 0.85, 'subsample': 1.0, 'learning_rate': 0.19, 'verbosity': 0, 'seed': 2}
+        est2 = CausalForestDML(model_t='auto',
+                               model_y=CalibratedClassifierCV(XGBClassifier(**xgb_param), cv=2),
+                               n_estimators=100, min_samples_leaf=5,
+                               max_depth=50,
+                               discrete_treatment=True,
+                               cv=1,
+                               verbose=0, random_state=123, )
+        est2.fit(train_data['Y'].values,
+                 train_data['T'].values,
+                 X=train_data[x_names].values,
+                 W=train_data[w_names].values,
+                 cache_values=True,
+                 **{'nuisance_Y': {'verbose': True,
+                                   'eval_metric': 'auc',
+                                   'early_stopping_rounds': 5,
+                                   'eval_set': [(val_data[x_names + w_names].values, val_data['Y'].values)]}}
+                 )
+
+        est2.fit = est2.refit_final
+        op = OptunaSearch(n_startup_trials=5, n_warmup_steps=5, n_trials=20, optuna_njobs=1,
+                          coef_train_val_disparity=0)
+        tuning_param_dict = {'min_weight_fraction_leaf': ('discrete_uniform', {'low': 0.005, 'high': 0.01, 'q': 0.005}),
+                             'max_depth': ('int', {'low': 3, 'high': 5, 'step': 1})
+                             }
+        train_params = {}
+        val_params = {'Y': val_data['Y'].values,
+                      'T': val_data['T'].values,
+                      'X': val_data[x_names].values,
+                      'W': val_data[w_names].values}
+        op.search(est2, tuning_param_dict, train_params, val_params)
+
+        opt_param = op.get_params()
+        print(opt_param)
+
+        a = CausalForestDML(model_t='auto',
+                            model_y=CalibratedClassifierCV(XGBClassifier(**xgb_param), cv=2),
+                            n_estimators=100, min_samples_leaf=5,
+                            max_depth=50,
+                            discrete_treatment=True,
+                            cv=1,
+                            verbose=0, random_state=123, )
+        for key, value in opt_param[0].items():
+            setattr(a, key, value)
+        a.fit(train_data['Y'].values,
+              train_data['T'].values,
+              X=train_data[x_names].values,
+              W=train_data[w_names].values,
+              cache_values=True,
+              **{'nuisance_Y': {'verbose': True,
+                                'eval_metric': 'auc',
+                                'early_stopping_rounds': 5,
+                                'eval_set': [(val_data[x_names + w_names].values, val_data['Y'].values)]}}
+              )
+        assert a.score(**val_params) == float(opt_param[-1]['val_score'])
+
+
+
